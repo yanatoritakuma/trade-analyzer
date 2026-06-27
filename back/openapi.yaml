@@ -1,0 +1,1630 @@
+openapi: 3.0.3
+info:
+  title: AI株式トレーディングシステム API
+  description: |
+    `doc/feature-spec`（機能仕様書）と `doc/dev-spec`（開発設計書）の画面・機能ごとに
+    必要なAPIを整理したOpenAPI定義。フロントエンドの型生成（openapi-typescript）と
+    バックエンドのサーバコード生成（oapi-codegen）の単一の真実のソースとして管理する。
+
+    ## 認証方式
+    - 一般API: ログイン時にHttpOnly Cookie（`access_token` / `refresh_token`）を発行し、
+      `access_token` を `cookieAuth` として送受信する（SameSite=Strict）。
+    - admin専用API（`/api/admin/*`）: `cookieAuth` に加えバックエンドの `RequireAdmin`
+      ミドルウェアで role=admin を検証する（OpenAPI上はroleを表現できないため説明で補足）。
+    - 内部API（`/internal/*`）: Lambda → Go の通信。ヘッダ `X-Internal-Secret`（`internalAuth`）で認証。
+  version: 1.0.0
+
+servers:
+  - url: http://localhost:8080
+    description: ローカル開発環境
+  - url: https://api.your-domain.com
+    description: 本番環境
+
+tags:
+  - name: auth
+    description: 認証（ログイン・登録・トークン・プロフィール取得）
+  - name: portfolio
+    description: 損益サマリー・保有ポジション（ダッシュボード/ポートフォリオ）
+  - name: analysis
+    description: 分析シグナル
+  - name: watchlist
+    description: ウォッチリスト（閲覧=全員 / 追加・削除=admin）
+  - name: trades
+    description: トレード履歴
+  - name: reports
+    description: 週次レポート
+  - name: admin-users
+    description: "管理者: ユーザー管理"
+  - name: admin-invitations
+    description: "管理者: 招待コード管理"
+  - name: admin-settings
+    description: "管理者: 分析設定・テーマ管理"
+  - name: admin-candidates
+    description: "管理者: ウォッチリスト候補承認"
+  - name: admin-account
+    description: "管理者: 自身のプロフィール・実運用保有株"
+  - name: internal
+    description: 内部API（Lambda → Go・X-Internal-Secret認証）
+
+security:
+  - cookieAuth: []
+
+paths:
+  # ============================================================
+  # SCR-01 / SCR-02 認証
+  # ============================================================
+  /api/auth/login:
+    post:
+      tags: [auth]
+      operationId: createAuthLogin
+      summary: ログイン
+      description: |
+        メール＋パスワードで認証し、成功時に access_token / refresh_token を
+        HttpOnly Cookieで発行する（Set-Cookie）。トークンはレスポンスボディに含めない。
+        認証失敗メッセージはメール/パスワードのどちらが誤りか特定させない文言で統一する。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: ログイン成功（Set-Cookieでaccess_token/refresh_tokenを返す）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: メールアドレスまたはパスワードが正しくありません
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: アカウント停止中
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/auth/register:
+    post:
+      tags: [auth]
+      operationId: createAuthRegister
+      summary: 新規登録
+      description: |
+        招待コード＋名前＋メール＋パスワードでアカウント作成（role は常に user）。
+        招待コードの検証と使用済みマークを同一トランザクションで行う。
+        登録時は自動ログインせずトークンは発行しない（成功後は /login へ誘導）。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '201':
+          description: 作成成功（トークンは発行しない）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '400':
+          description: 招待コード無効/期限切れ/使用済み・メール重複・入力不正
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/auth/me:
+    get:
+      tags: [auth]
+      operationId: getAuthMe
+      summary: ログイン中ユーザー情報取得
+      description: |
+        Cookieのaccess_tokenから本人情報を返す。middlewareのadmin判定（role検証）と
+        設定画面のプロフィール取得で使用する。
+      responses:
+        '200':
+          description: 取得成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/auth/refresh:
+    post:
+      tags: [auth]
+      operationId: createAuthRefresh
+      summary: アクセストークン再発行
+      description: refresh_token Cookieから新しいアクセストークンを再発行する（リフレッシュトークンもローテーション）。
+      responses:
+        '200':
+          description: 再発行成功（Set-Cookie）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/auth/logout:
+    post:
+      tags: [auth]
+      operationId: createAuthLogout
+      summary: ログアウト
+      description: access_token / refresh_token のCookieを削除する。
+      responses:
+        '200':
+          description: ログアウト成功（Cookie削除）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+
+  # ============================================================
+  # SCR-03 / SCR-06 ダッシュボード・ポートフォリオ
+  # ============================================================
+  /api/portfolio/summary:
+    get:
+      tags: [portfolio]
+      operationId: getPortfolioSummary
+      summary: 損益サマリー取得
+      description: |
+        バーチャル/実運用別の損益サマリー（累計損益・今週損益・勝率・トレード数）。
+        記録は管理者のtradesのみ（共通ポートフォリオ）のため、呼び出しユーザーに関わらず
+        admin の集計を返す。今週損益は今週月曜0:00(JST)以降に決済(closed_at)した損益。
+        SCR-03ダッシュボードとSCR-06ポートフォリオ、SCR-09管理ダッシュボードで共有。
+      responses:
+        '200':
+          description: 取得成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PortfolioSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/analysis/latest:
+    get:
+      tags: [analysis]
+      operationId: getAnalysisLatest
+      summary: 最新分析シグナル取得
+      description: analysis_logs を analyzed_at 降順に直近 limit 件（既定3件）取得する。銘柄名はwatchlistから付与。
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 3
+            minimum: 1
+          description: 取得件数（既定3）
+      responses:
+        '200':
+          description: 取得成功
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AnalysisSignal'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/positions:
+    get:
+      tags: [portfolio]
+      operationId: getPositions
+      summary: 実運用保有株一覧
+      description: |
+        実運用の保有株（real_positions・admin登録分）に stock_prices を結合し、
+        現在値・含み益・損益率を付与して返す。stock_prices が無い銘柄は close/含み益がnull。
+      responses:
+        '200':
+          description: 取得成功
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Position'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ============================================================
+  # SCR-04 ウォッチリスト
+  # ============================================================
+  /api/watchlist:
+    get:
+      tags: [watchlist]
+      operationId: getWatchlist
+      summary: ウォッチリスト取得
+      description: 全ユーザー共通のウォッチリスト（is_active=true）に現在値・前日比を付与して返す。閲覧は全員可。
+      responses:
+        '200':
+          description: 取得成功
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/WatchlistItem'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/admin/watchlist:
+    post:
+      tags: [watchlist]
+      operationId: createAdminWatchlist
+      summary: ウォッチリストに銘柄追加（admin）
+      description: |
+        4桁の銘柄コードを受け取りサーバで末尾に `.T` を付与して登録する。
+        is_active=true が3件未満のときのみ追加可。ticker重複は不可。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WatchlistCreateRequest'
+      responses:
+        '201':
+          description: 追加成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WatchlistItem'
+        '400':
+          description: 「最大3銘柄まで登録できます」/「すでに登録されている銘柄です」/入力不正
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/admin/watchlist/{id}:
+    delete:
+      tags: [watchlist]
+      operationId: deleteAdminWatchlistById
+      summary: ウォッチリスト銘柄削除（admin）
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      responses:
+        '204':
+          description: 削除成功
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ============================================================
+  # SCR-05 トレード履歴
+  # ============================================================
+  /api/trades:
+    get:
+      tags: [trades]
+      operationId: getTrades
+      summary: トレード履歴取得
+      description: |
+        管理者のtrades（共通ポートフォリオ）をフィルタ付きで一覧取得する。
+        詳細モーダル用に analysis_logs を結合し買う/買わない理由・エントリー条件を同梱（該当なしはnull）。
+        items に加えフッター集計（件数・勝率・累計損益）を summary で返す。
+        SCR-06ポートフォリオではバーチャル保有/損益推移の元データとしても利用する。
+      parameters:
+        - name: mode
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [virtual, real]
+          description: タブ（バーチャル/実運用）
+        - name: ticker
+          in: query
+          required: false
+          schema:
+            type: string
+          description: 銘柄コードで絞り込み
+        - name: action
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [BUY, SELL]
+          description: 売買で絞り込み
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+          description: 開始日（YYYY-MM-DD）
+        - name: to
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+          description: 終了日（YYYY-MM-DD）
+      responses:
+        '200':
+          description: 取得成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TradeListResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ============================================================
+  # SCR-07 週次レポート
+  # ============================================================
+  /api/reports:
+    get:
+      tags: [reports]
+      operationId: getReports
+      summary: 週次レポート一覧
+      description: learning_logs を week_start 降順で一覧取得する（全ユーザー共通）。
+      responses:
+        '200':
+          description: 取得成功
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ReportSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/reports/{week}:
+    get:
+      tags: [reports]
+      operationId: getReportsByWeek
+      summary: 週次レポート詳細
+      description: |
+        week_start（YYYY-MM-DD・月曜）で1件取得する。最大ドローダウンは当週tradesの
+        累積損益曲線から算出し、当週トレード一覧を同梱する。
+      parameters:
+        - name: week
+          in: path
+          required: true
+          schema:
+            type: string
+            format: date
+          description: week_start（YYYY-MM-DD・月曜）
+      responses:
+        '200':
+          description: 取得成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReportDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ============================================================
+  # SCR-08 設定（admin専用の更新系）
+  # ============================================================
+  /api/admin/me:
+    patch:
+      tags: [admin-account]
+      operationId: updateAdminMe
+      summary: プロフィール（名前）更新（admin）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProfileUpdateRequest'
+      responses:
+        '200':
+          description: 更新成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/admin/me/password:
+    put:
+      tags: [admin-account]
+      operationId: updateAdminMePassword
+      summary: パスワード変更（admin）
+      description: 現在のパスワードをbcrypt照合し、新パスワードを再ハッシュ保存する。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordChangeRequest'
+      responses:
+        '200':
+          description: 変更成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '400':
+          description: 「現在のパスワードが正しくありません」/入力不正
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/admin/positions:
+    post:
+      tags: [admin-account]
+      operationId: createAdminPositions
+      summary: 実運用保有株の登録（admin）
+      description: 4桁コードに `.T` を付与し、adminのuser_idで登録する。(user_id, ticker)はUNIQUE。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PositionRequest'
+      responses:
+        '201':
+          description: 登録成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Position'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/admin/positions/{id}:
+    put:
+      tags: [admin-account]
+      operationId: updateAdminPositionsById
+      summary: 実運用保有株の更新（admin）
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PositionRequest'
+      responses:
+        '200':
+          description: 更新成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Position'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [admin-account]
+      operationId: deleteAdminPositionsById
+      summary: 実運用保有株の削除（admin）
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      responses:
+        '204':
+          description: 削除成功
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ============================================================
+  # SCR-09 / SCR-10 ユーザー管理
+  # ============================================================
+  /api/admin/users:
+    get:
+      tags: [admin-users]
+      operationId: getAdminUsers
+      summary: ユーザー一覧取得（admin）
+      description: 登録ユーザーの一覧（名前・ロール・状態）。SCR-09ダッシュボードのユーザー数表示にも使用。
+      responses:
+        '200':
+          description: 取得成功
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AdminUser'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/admin/users/{id}:
+    patch:
+      tags: [admin-users]
+      operationId: updateAdminUsersById
+      summary: ユーザーの停止/復活（admin）
+      description: is_active を切り替える。admin自身は操作対象外。
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserStatusUpdateRequest'
+      responses:
+        '200':
+          description: 更新成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminUser'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [admin-users]
+      operationId: deleteAdminUsersById
+      summary: ユーザー削除（admin・物理削除）
+      description: 物理削除。admin自身は削除対象外。
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      responses:
+        '204':
+          description: 削除成功
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ============================================================
+  # SCR-09 / SCR-11 招待コード管理
+  # ============================================================
+  /api/admin/invitations:
+    get:
+      tags: [admin-invitations]
+      operationId: getAdminInvitations
+      summary: 招待コード一覧取得（admin）
+      description: 招待コード一覧。SCR-09の有効招待コード数の取得にも使用する。
+      responses:
+        '200':
+          description: 取得成功
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Invitation'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [admin-invitations]
+      operationId: createAdminInvitations
+      summary: 招待コード発行（admin）
+      description: 有効期限（3/7/14/30日）を指定して `TRADE-XXXX-XXXX` を発行する。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InvitationCreateRequest'
+      responses:
+        '201':
+          description: 発行成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InvitationCreateResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/admin/invitations/{id}:
+    delete:
+      tags: [admin-invitations]
+      operationId: deleteAdminInvitationsById
+      summary: 招待コード無効化（admin）
+      description: is_active を false にする（無効化）。
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      responses:
+        '204':
+          description: 無効化成功
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ============================================================
+  # SCR-12 分析設定・テーマ管理
+  # ============================================================
+  /api/admin/analysis-settings:
+    get:
+      tags: [admin-settings]
+      operationId: getAdminAnalysisSettings
+      summary: 分析設定取得（admin）
+      description: is_active=true の単一設定を取得する。
+      responses:
+        '200':
+          description: 取得成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalysisSetting'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    put:
+      tags: [admin-settings]
+      operationId: updateAdminAnalysisSettings
+      summary: 分析設定保存（admin）
+      description: 既存の is_active=true を更新（無ければINSERT）。常に1件のみactiveを保証する。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AnalysisSettingRequest'
+      responses:
+        '200':
+          description: 保存成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalysisSetting'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/admin/analysis-themes:
+    get:
+      tags: [admin-settings]
+      operationId: getAdminAnalysisThemes
+      summary: 分析テーマ一覧取得（admin）
+      description: sort_order 昇順で取得する。
+      responses:
+        '200':
+          description: 取得成功
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Theme'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [admin-settings]
+      operationId: createAdminAnalysisThemes
+      summary: 分析テーマ追加（admin）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ThemeRequest'
+      responses:
+        '201':
+          description: 追加成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Theme'
+        '400':
+          description: 「テーマ名を入力してください」/「すでに存在するテーマ名です」/入力不正
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/admin/analysis-themes/sort:
+    patch:
+      tags: [admin-settings]
+      operationId: updateAdminAnalysisThemesSort
+      summary: 分析テーマの並び替え（admin）
+      description: ドラッグ&ドロップ後の sort_order を一括更新する。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: '#/components/schemas/ThemeSortItem'
+      responses:
+        '200':
+          description: 並び替え成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/admin/analysis-themes/{id}:
+    put:
+      tags: [admin-settings]
+      operationId: updateAdminAnalysisThemesById
+      summary: 分析テーマ編集（admin）
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ThemeRequest'
+      responses:
+        '200':
+          description: 更新成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Theme'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [admin-settings]
+      operationId: deleteAdminAnalysisThemesById
+      summary: 分析テーマ削除（admin）
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      responses:
+        '204':
+          description: 削除成功
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ============================================================
+  # SCR-13 ウォッチリスト候補承認
+  # ============================================================
+  /api/admin/watchlist-candidates:
+    get:
+      tags: [admin-candidates]
+      operationId: getAdminWatchlistCandidates
+      summary: ウォッチリスト候補一覧取得（admin）
+      description: 承認待ち（pending）と承認済み履歴（approved/rejected）を含む候補一覧。
+      responses:
+        '200':
+          description: 取得成功
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/WatchlistCandidate'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/admin/watchlist-candidates/{id}/approve:
+    patch:
+      tags: [admin-candidates]
+      operationId: updateAdminWatchlistCandidatesByIdApprove
+      summary: 候補承認（admin）
+      description: |
+        候補を承認し watchlist を更新する（UoWで一括）。replace_ticker 指定時は該当銘柄を削除してから追加。
+        replaceなし承認で既に3銘柄なら拒否する。mode は承認ダイアログで選択（既定 both）。
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CandidateApproveRequest'
+      responses:
+        '200':
+          description: 承認成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WatchlistCandidate'
+        '400':
+          description: 「最大3銘柄まで登録できます」等
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/admin/watchlist-candidates/{id}/reject:
+    patch:
+      tags: [admin-candidates]
+      operationId: updateAdminWatchlistCandidatesByIdReject
+      summary: 候補却下（admin）
+      description: 候補の status を rejected に更新する（確認なし・即時）。
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      responses:
+        '200':
+          description: 却下成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WatchlistCandidate'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ============================================================
+  # 内部API（Lambda → Go・X-Internal-Secret認証）
+  # ============================================================
+  /internal/watchlist:
+    get:
+      tags: [internal]
+      operationId: getInternalWatchlist
+      summary: ウォッチリスト取得（内部・株価取得Lambda用）
+      description: Lambdaが株価取得対象を取得するための内部API。is_active=true の銘柄を返す。
+      security:
+        - internalAuth: []
+      responses:
+        '200':
+          description: 取得成功
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/InternalWatchlistItem'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /internal/stock-prices:
+    post:
+      tags: [internal]
+      operationId: createInternalStockPrices
+      summary: 株価取り込み（内部・株価取得Lambdaから受信）
+      description: |
+        Lambdaが取得した各銘柄の120日分OHLCVを受信する。Goは末尾2営業日から前日比を算出し、
+        ticker をキーに stock_prices をUPSERTする。
+      security:
+        - internalAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StockPricesIngestRequest'
+      responses:
+        '200':
+          description: 取り込み成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: access_token
+    internalAuth:
+      type: apiKey
+      in: header
+      name: X-Internal-Secret
+
+  parameters:
+    IdPath:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: integer
+      description: リソースID
+
+  responses:
+    BadRequest:
+      description: リクエスト不正・バリデーションエラー
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Unauthorized:
+      description: 未認証
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Forbidden:
+      description: 権限なし（admin専用）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: リソースが見つかりません
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  schemas:
+    # ---------- 共通 ----------
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: エラーメッセージ
+
+    MessageResponse:
+      type: object
+      properties:
+        message:
+          type: string
+
+    User:
+      type: object
+      properties:
+        id:
+          type: integer
+        email:
+          type: string
+          format: email
+        name:
+          type: string
+        role:
+          type: string
+          enum: [admin, user]
+
+    # ---------- 認証 ----------
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+
+    RegisterRequest:
+      type: object
+      required: [invitation_code, name, email, password]
+      properties:
+        invitation_code:
+          type: string
+        name:
+          type: string
+          maxLength: 50
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 8
+
+    AuthResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        user:
+          $ref: '#/components/schemas/User'
+
+    # ---------- ポートフォリオ・分析・ウォッチリスト ----------
+    PortfolioSummary:
+      type: object
+      properties:
+        virtual:
+          $ref: '#/components/schemas/ModeSummary'
+        real:
+          $ref: '#/components/schemas/ModeSummary'
+
+    ModeSummary:
+      type: object
+      properties:
+        total_pnl:
+          type: number
+          description: 累計損益
+        weekly_pnl:
+          type: number
+          description: 今週損益（今週月曜0:00 JST起点の決済損益）
+        win_rate:
+          type: number
+          description: 勝率(%)
+        trade_count:
+          type: integer
+          description: 累計トレード数
+
+    AnalysisSignal:
+      type: object
+      properties:
+        ticker:
+          type: string
+        name:
+          type: string
+          nullable: true
+        action:
+          type: string
+          enum: [BUY, SELL, HOLD]
+        confidence:
+          type: number
+          nullable: true
+        analyzed_at:
+          type: string
+          format: date-time
+
+    WatchlistItem:
+      type: object
+      properties:
+        id:
+          type: integer
+        ticker:
+          type: string
+        name:
+          type: string
+          nullable: true
+        mode:
+          type: string
+          enum: [virtual, real, both]
+        close:
+          type: number
+          nullable: true
+          description: 現在値（stock_prices.close）
+        change_rate:
+          type: number
+          nullable: true
+          description: 前日比%（stock_prices.change_rate）
+
+    WatchlistCreateRequest:
+      type: object
+      required: [code, mode]
+      properties:
+        code:
+          type: string
+          pattern: '^[0-9]{4}$'
+          description: 4桁の銘柄コード。サーバで `.T` を付与する
+        mode:
+          type: string
+          enum: [virtual, real, both]
+
+    Position:
+      type: object
+      properties:
+        id:
+          type: integer
+        ticker:
+          type: string
+        name:
+          type: string
+          nullable: true
+        quantity:
+          type: integer
+        avg_price:
+          type: number
+        close:
+          type: number
+          nullable: true
+          description: 現在値（stock_prices.close）
+        unrealized_pnl:
+          type: number
+          nullable: true
+          description: 含み益＝(close - avg_price) * quantity
+        pnl_rate:
+          type: number
+          nullable: true
+          description: 損益率%＝(close/avg_price - 1) * 100
+
+    PnlPoint:
+      type: object
+      description: 損益推移の1点。専用APIは設けず /api/trades の決済データからフロントで生成する。
+      properties:
+        date:
+          type: string
+          format: date
+        cumulative_pnl:
+          type: number
+
+    # ---------- トレード ----------
+    Trade:
+      type: object
+      properties:
+        id:
+          type: integer
+        ticker:
+          type: string
+        name:
+          type: string
+          nullable: true
+        mode:
+          type: string
+          enum: [virtual, real]
+        action:
+          type: string
+          enum: [BUY, SELL]
+        price:
+          type: number
+        quantity:
+          type: integer
+        confidence:
+          type: number
+          nullable: true
+        reason:
+          type: string
+          nullable: true
+        target_price:
+          type: number
+          nullable: true
+        stop_loss:
+          type: number
+          nullable: true
+        result_pnl:
+          type: number
+          nullable: true
+        closed_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        buy_reasons:
+          type: array
+          items:
+            type: string
+          nullable: true
+          description: analysis_logs由来（詳細モーダル用・該当なしnull）
+        no_buy_reasons:
+          type: array
+          items:
+            type: string
+          nullable: true
+        entry_condition:
+          type: string
+          nullable: true
+
+    TradeListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Trade'
+        summary:
+          type: object
+          properties:
+            count:
+              type: integer
+            win_rate:
+              type: number
+            total_pnl:
+              type: number
+
+    # ---------- レポート ----------
+    ReportSummary:
+      type: object
+      properties:
+        week_start:
+          type: string
+          format: date
+        week_end:
+          type: string
+          format: date
+        trade_count:
+          type: integer
+        win_rate:
+          type: number
+        total_pnl:
+          type: number
+
+    ReportDetail:
+      allOf:
+        - $ref: '#/components/schemas/ReportSummary'
+        - type: object
+          properties:
+            max_drawdown:
+              type: number
+              nullable: true
+            summary:
+              type: string
+            lessons:
+              type: string
+            strategy:
+              type: string
+            trades:
+              type: array
+              items:
+                $ref: '#/components/schemas/Trade'
+
+    # ---------- 設定（プロフィール・保有株） ----------
+    ProfileUpdateRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          maxLength: 50
+
+    PasswordChangeRequest:
+      type: object
+      required: [current_password, new_password]
+      properties:
+        current_password:
+          type: string
+        new_password:
+          type: string
+          minLength: 8
+
+    PositionRequest:
+      type: object
+      required: [code, avg_price, quantity]
+      properties:
+        code:
+          type: string
+          pattern: '^[0-9]{4}$'
+          description: 4桁の銘柄コード。サーバで `.T` を付与する
+        avg_price:
+          type: number
+          minimum: 1
+        quantity:
+          type: integer
+          minimum: 1
+
+    # ---------- 管理: ユーザー ----------
+    AdminUser:
+      type: object
+      properties:
+        id:
+          type: integer
+        email:
+          type: string
+        name:
+          type: string
+        role:
+          type: string
+          enum: [admin, user]
+        is_active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    UserStatusUpdateRequest:
+      type: object
+      required: [is_active]
+      properties:
+        is_active:
+          type: boolean
+
+    # ---------- 管理: 招待コード ----------
+    Invitation:
+      type: object
+      properties:
+        id:
+          type: integer
+        code:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+        used_by:
+          type: integer
+          nullable: true
+        used_at:
+          type: string
+          format: date-time
+          nullable: true
+        is_active:
+          type: boolean
+        status:
+          type: string
+          enum: [valid, used, expired, disabled]
+          description: 表示用ステータス（有効/使用済/期限切/無効）
+        created_at:
+          type: string
+          format: date-time
+
+    InvitationCreateRequest:
+      type: object
+      required: [expires_days]
+      properties:
+        expires_days:
+          type: integer
+          enum: [3, 7, 14, 30]
+
+    InvitationCreateResponse:
+      type: object
+      properties:
+        code:
+          type: string
+          example: TRADE-ABCD-1234
+        expires_at:
+          type: string
+          format: date-time
+
+    # ---------- 管理: 分析設定・テーマ ----------
+    Screening:
+      type: object
+      description: スクリーニング条件
+      properties:
+        min_market_cap:
+          type: integer
+          description: 時価総額（円以上）
+        min_volume:
+          type: integer
+          description: 出来高（株以上）
+        max_per:
+          type: number
+          description: PER（以下）
+
+    AnalysisStyle:
+      type: string
+      enum:
+        - short_term_trend
+        - short_term_contrarian
+        - short_term_both
+        - mid_term_trend
+        - mid_term_contrarian
+        - mid_term_both
+      description: 分析スタイル（期間×方向）
+
+    AnalysisSetting:
+      type: object
+      properties:
+        id:
+          type: integer
+        theme_ids:
+          type: array
+          items:
+            type: integer
+        screening:
+          $ref: '#/components/schemas/Screening'
+        style:
+          $ref: '#/components/schemas/AnalysisStyle'
+        free_prompt:
+          type: string
+          nullable: true
+          maxLength: 1000
+        is_active:
+          type: boolean
+        updated_at:
+          type: string
+          format: date-time
+
+    AnalysisSettingRequest:
+      type: object
+      required: [theme_ids, style]
+      properties:
+        theme_ids:
+          type: array
+          items:
+            type: integer
+          minItems: 1
+          description: 1つ以上選択
+        screening:
+          $ref: '#/components/schemas/Screening'
+        style:
+          $ref: '#/components/schemas/AnalysisStyle'
+        free_prompt:
+          type: string
+          maxLength: 1000
+
+    Theme:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        sort_order:
+          type: integer
+        is_active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    ThemeRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          maxLength: 100
+        description:
+          type: string
+          maxLength: 255
+        is_active:
+          type: boolean
+
+    ThemeSortItem:
+      type: object
+      required: [id, sort_order]
+      properties:
+        id:
+          type: integer
+        sort_order:
+          type: integer
+
+    # ---------- 管理: ウォッチリスト候補 ----------
+    WatchlistCandidate:
+      type: object
+      properties:
+        id:
+          type: integer
+        ticker:
+          type: string
+        name:
+          type: string
+          nullable: true
+        reason:
+          type: string
+          nullable: true
+        replace_ticker:
+          type: string
+          nullable: true
+        confidence:
+          type: number
+          nullable: true
+        status:
+          type: string
+          enum: [pending, approved, rejected]
+        proposed_at:
+          type: string
+          format: date-time
+        decided_at:
+          type: string
+          format: date-time
+          nullable: true
+        decided_by:
+          type: integer
+          nullable: true
+
+    CandidateApproveRequest:
+      type: object
+      properties:
+        mode:
+          type: string
+          enum: [virtual, real, both]
+          default: both
+          description: 承認時に watchlist へ登録するモード（既定 both）
+
+    # ---------- 内部API ----------
+    InternalWatchlistItem:
+      type: object
+      properties:
+        id:
+          type: integer
+        ticker:
+          type: string
+        name:
+          type: string
+          nullable: true
+        mode:
+          type: string
+          enum: [virtual, real, both]
+
+    StockPricesIngestRequest:
+      type: object
+      required: [fetched_at, stocks]
+      properties:
+        fetched_at:
+          type: string
+          format: date-time
+          description: 取得時刻（JST ISO8601）
+        stocks:
+          type: array
+          items:
+            $ref: '#/components/schemas/StockPriceSeries'
+
+    StockPriceSeries:
+      type: object
+      required: [ticker, prices]
+      properties:
+        ticker:
+          type: string
+        prices:
+          type: array
+          items:
+            $ref: '#/components/schemas/Ohlcv'
+
+    Ohlcv:
+      type: object
+      required: [date, open, high, low, close, volume]
+      properties:
+        date:
+          type: string
+          format: date
+        open:
+          type: number
+        high:
+          type: number
+        low:
+          type: number
+        close:
+          type: number
+        volume:
+          type: integer
+          format: int64
