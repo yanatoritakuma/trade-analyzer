@@ -1797,14 +1797,17 @@ venv/
 
 ### 10.1 概要
 
-budgetリポジトリと同様の構成を踏襲しつつ、DBはNeon（クラウド）を使用するため **DBコンテナは不要**。
+budgetリポジトリと同様の構成を踏襲する。**ローカル開発では `docker compose` にローカル用のPostgreSQLコンテナ（`db`）を同梱し、ローカル完結で動作確認できる構成**とする（ISSUE #2 の方針）。本番・ステージングではNeon（クラウド）を使用し、接続先は環境変数 `DATABASE_URL` / `NEON_DATABASE_URL` で切り替える。
 
 | サービス | 起動方法 | ポート |
 |---------|---------|--------|
 | フロントエンド（Next.js） | ローカル（npm run dev） | 3000 |
 | バックエンド（Go / Gin） | Docker（budgetと同様） | 8080 |
-| DB | Neon（クラウド・常時起動） | - |
+| DB（ローカル） | Docker（postgres:16-alpine の `db` サービス） | 5432 |
+| DB（本番/ステージング） | Neon（クラウド・常時起動） | - |
 | Python Lambda | ローカル手動実行 | - |
+
+> **DB接続の切り替え**: アプリは `DATABASE_URL` を優先し、未設定時に `NEON_DATABASE_URL` を使用する。ローカルは `db` サービスを指す `DATABASE_URL`（`.env.example` 参照）、Neon利用時は `DATABASE_URL` を空にして `NEON_DATABASE_URL` を設定する。
 
 ---
 
@@ -1832,7 +1835,7 @@ npm install -g @anthropic-ai/claude-code
 
 ### 10.3 バックエンドのDocker構成
 
-budgetの `back/Dockerfile` と `back/docker-compose.yml` を参考に構成。DBはNeonを使うためDBコンテナは含めない。
+budgetの `back/Dockerfile` と `back/docker-compose.yml` を参考に構成。**ローカル開発用にPostgreSQLコンテナ（`db`）を同梱する**（ISSUE #2 の方針）。`app` は `db` の healthcheck 完了後に起動し、`DATABASE_URL` で `db` サービスに接続する。Neon利用時は `db` を起動せず `DATABASE_URL` / `NEON_DATABASE_URL` をNeonのURLに差し替える。実際の構成は `back/docker-compose.yml`・`back/docker-compose.dev.yml` を参照。
 
 #### back/Dockerfile
 

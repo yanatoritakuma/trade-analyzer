@@ -1,0 +1,21 @@
+# Next.js
+.next/
+out/
+
+# 依存関係
+node_modules/
+
+# 環境変数
+.env.local
+.env.*.local
+
+# 自動生成ファイル（生成コマンドで再生成できるためコミット不要）
+src/types/api.ts
+
+# ビルド成果物
+dist/
+
+# その他
+next-env.d.ts
+*.tsbuildinfo
+.DS_Store
