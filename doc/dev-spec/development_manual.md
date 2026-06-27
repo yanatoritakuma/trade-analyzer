@@ -40,7 +40,7 @@ trading-system/
   └── docs/            # 仕様書・devspec
       ├── spec.md
       ├── development_manual.md
-      ├── devspec_01_login.md
+      ├── feature_01_login.md
       └── ...
 ```
 
@@ -1787,7 +1787,7 @@ venv/
   └── docs/
       ├── spec.md
       ├── development_manual.md
-      ├── devspec_01_login.md
+      ├── feature_01_login.md
       └── ...
 ```
 

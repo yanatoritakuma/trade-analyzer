@@ -140,7 +140,7 @@ LINE通知（週次サマリー）
 | 株価取得 | Python 3.11 / Lambda | yfinanceがPython専用ライブラリ | 無料枠内 |
 | 定期実行 | AWS EventBridge | Lambda連携・Cron設定 | 無料枠内 |
 | 株価取得ライブラリ | yfinance | 日本株対応・無料・簡単 | 無料 |
-| AI分析エンジン | Claude API（claude-sonnet-4） | 高精度分析・JSON出力 | 月$3〜5 |
+| AI分析エンジン | Claude API（claude-sonnet-4-20250514） | 高精度分析・JSON出力 | 月$3〜5 |
 | データベース | Neon（Serverless PostgreSQL） | 無料枠十分・SQL集計可能 | 無料 |
 | 学習CSVストレージ | AWS S3 | バージョン管理・低コスト | ほぼ無料 |
 | 通知 | LINE Messaging API | 普及率高く確認しやすい | 無料 |
@@ -689,7 +689,8 @@ AI出力は `position_size`（資産比率）・`target_price`・`stop_loss` を
 - 算出結果が **0株（1単元に満たない）の場合はBUYをスキップ**（trades記録・通知とも行わない）。
 
 **【BUY記録】**
-- `trades` に `mode='virtual'`, `action='BUY'`, `price`, `quantity`, `confidence`, `reason`, `target_price`, `stop_loss` を保存（`user_id = admin`, `closed_at = NULL`）。
+- `trades` に `mode='virtual'`, `action='BUY'`, `ticker`, `name`, `price`, `quantity`, `confidence`, `reason`, `target_price`, `stop_loss` を保存（`user_id = admin`, `closed_at = NULL`）。
+- `name` は分析対象の `watchlist.name` から取得して**記録時に保存**する（ウォッチリストから外れても履歴で銘柄名を表示できるようにするため）。
 
 **【SELL記録・損益確定】**
 - 同一銘柄の未決済BUYポジション（`closed_at IS NULL`）を**古い順（FIFO）に決済**する。
@@ -823,6 +824,7 @@ CREATE TABLE trades (
   id           SERIAL PRIMARY KEY,
   user_id      INT           NOT NULL REFERENCES users(id),
   ticker       VARCHAR(10)   NOT NULL,
+  name         VARCHAR(100),                   -- 記録時にwatchlist.nameから非正規化保存（履歴表示用）
   mode         VARCHAR(10)   NOT NULL
                  CHECK (mode IN ('virtual', 'real')),
   action       VARCHAR(10)   NOT NULL
@@ -952,7 +954,7 @@ CREATE INDEX idx_analysis_themes_sort_order  ON analysis_themes (sort_order);
 |------|-----|
 | エンドポイント | `https://api.anthropic.com/v1/messages` |
 | モデル | `claude-sonnet-4-20250514` |
-| max_tokens | 1,000 |
+| max_tokens | 1,500（分析JSON＋ウォッチリスト候補提案を含むため・5.2.1と統一） |
 | 月額上限 | $5（Anthropicダッシュボードで設定） |
 
 #### リクエスト構造
@@ -960,7 +962,7 @@ CREATE INDEX idx_analysis_themes_sort_order  ON analysis_themes (sort_order);
 ```python
 {
   "model": "claude-sonnet-4-20250514",
-  "max_tokens": 1000,
+  "max_tokens": 1500,
   "system": "<システムプロンプト（学習ログ含む）>",
   "messages": [
     {
