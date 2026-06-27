@@ -1,0 +1,39 @@
+{
+  "name": "trade-analyzer-front",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --turbopack",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "format": "prettier --write \"src/**/*.{ts,tsx,scss,css}\"",
+    "generate:api": "openapi-typescript ../back/openapi.yaml -o src/types/api.ts"
+  },
+  "dependencies": {
+    "@emotion/react": "^11.13.0",
+    "@emotion/styled": "^11.13.0",
+    "@hookform/resolvers": "^3.9.0",
+    "@mui/icons-material": "^7.0.0",
+    "@mui/material": "^7.0.0",
+    "date-fns": "^4.1.0",
+    "next": "^15.1.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-hook-form": "^7.53.0",
+    "recharts": "^2.13.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@eslint/eslintrc": "^3",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "^15.1.0",
+    "openapi-typescript": "^7.4.0",
+    "prettier": "^3.3.0",
+    "sass": "^1.80.0",
+    "typescript": "^5"
+  }
+}

@@ -1,0 +1,39 @@
+# back/docker-compose.yml（通常起動）
+# ローカル開発ではローカル用のPostgreSQLコンテナ（db）を同梱する。
+# Neon（クラウド）に接続する場合は app の DATABASE_URL を Neon のURLに差し替え、
+# db サービスを停止すればよい。
+services:
+  app:
+    build: .
+    ports:
+      - "8080:8080"
+    env_file: ./.env
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - backend
+
+  db:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - backend
+
+volumes:
+  db_data:
+
+networks:
+  backend:

@@ -1,0 +1,11 @@
+# ビルド成果物
+tmp/
+bootstrap
+lambda-handler.zip
+
+# 環境変数
+.env
+
+# テストカバレッジ
+coverage.out
+coverage.html

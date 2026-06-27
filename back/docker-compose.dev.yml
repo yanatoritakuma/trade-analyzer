@@ -1,0 +1,42 @@
+# back/docker-compose.dev.yml（airホットリロード開発用）
+# ローカル用PostgreSQL（db）+ airで自動再起動するGoアプリ（app）。
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    ports:
+      - "8080:8080"
+    env_file: ./.env
+    volumes:
+      - .:/app
+      - /app/tmp
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - backend
+
+  db:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - backend
+
+volumes:
+  db_data:
+
+networks:
+  backend:
