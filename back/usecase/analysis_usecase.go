@@ -2,6 +2,7 @@ package usecase
 
 import (
 	"context"
+	"log"
 
 	"github.com/yanatoritakuma/trade-analyzer/back/domain"
 	"github.com/yanatoritakuma/trade-analyzer/back/domain/analysis"
@@ -28,6 +29,16 @@ func NewAnalysisUsecase(
 		claudeClient: claudeClient,
 		lineClient:   lineClient,
 	}
+}
+
+// RunScheduled は定期実行（平日15:30 JST・EventBridge→Lambda直接呼び出し）のエントリポイント。
+//
+// 分析パイプライン本体（stock_prices＋watchlist→Claude分析→analysis_logs/trades保存→LINE通知、
+// およびウォッチリスト候補提案）は別フェーズで実装する。現状は配線確認用のスタブ（ログのみ）。
+// 戻り値のerrorはEventBridgeのリトライ判定に使われるため、未実装段階では正常終了(nil)を返す。
+func (u *AnalysisUsecase) RunScheduled(ctx context.Context) error {
+	log.Println("[analysis] RunScheduled 呼び出し（分析パイプライン本体は次フェーズで実装）")
+	return nil
 }
 
 // Latest は直近の分析シグナルを取得する。

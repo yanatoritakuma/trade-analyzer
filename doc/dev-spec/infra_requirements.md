@@ -21,23 +21,28 @@
                             ▼
           ┌──────────────────────────────────┐
           │ API Gateway (HTTP API)            │
-          │   └─ Lambda: Go本体 (back/)        │──┐
+          │   └─ Lambda: ApiFunction (back/)   │──┐
           └──────────────────────────────────┘  │ DATABASE接続
-                            ▲                     ▼
-   X-Internal-Secret        │            ┌────────────────────┐
-                            │            │ Neon (PostgreSQL)  │
-   ┌────────────────────────┴───┐        └────────────────────┘
-   │ EventBridge (定期実行)       │
+              ▲                                   ▼
+   X-Internal-Secret(株価取得のみ)        ┌────────────────────┐
+              │                          │ Neon (PostgreSQL)  │
+   ┌──────────┴─────────────────┐        └────────────────────┘
+   │ EventBridge (定期実行)       │                ▲
    │  ├─ 平日15:00 株価取得Lambda │─(yfinance)─▶ /internal/stock-prices
-   │  ├─ 平日15:30 分析実行        │           ▶ Claude API ─▶ trades/analysis_logs ─▶ LINE通知
-   │  └─ 日曜18:00 週次レポート     │           ▶ Claude API + S3 ─▶ learning_logs/learning_versions
-   └────────────────────────────┘
+   │  │                          │     ┌──────────────────────────────┐
+   │  ├─ 平日15:30 分析実行        │──直接invoke──▶│ Lambda: WorkerFunction │
+   │  └─ 日曜18:00 週次レポート     │  {"job":...}  │  (同一Goバイナリ/最大15分) │
+   └────────────────────────────┘     └──────────────┬───────────────┘
+        (案B: API Gatewayを介さずIAM認証で直接呼び出し)   │
+                  ▶ Claude API ─▶ trades/analysis_logs ─▶ LINE通知
+                  ▶ Claude API + S3 ─▶ learning_logs/learning_versions
 ```
 
 | レイヤ | サービス | 役割 |
 |--------|---------|------|
 | フロント | Vercel 等 | Next.js（App Router）ホスティング |
-| API | AWS API Gateway (HTTP API) + Lambda | Go本体（`back/`）。`make build-lambda` でデプロイ |
+| API | AWS API Gateway (HTTP API) + Lambda (`ApiFunction`) | Go本体（`back/`）の同期API。`make build-lambda` でデプロイ |
+| バッチ | AWS Lambda (`WorkerFunction`) | 同一Goバイナリ。分析・週次をEventBridgeから直接実行（最大15分・案B） |
 | 株価取得 | AWS Lambda (Python) | yfinanceで株価取得し `/internal/stock-prices` にPOST |
 | 定期実行 | AWS EventBridge | 株価取得・分析・週次レポートのスケジュール起動 |
 | DB | Neon (Serverless PostgreSQL) | 本番/ステージング |
@@ -153,14 +158,21 @@ make build-lambda     # bootstrap を生成し lambda-handler.zip を作成
 
 ## 7. EventBridge スケジュール
 
-| ルール | スケジュール（JST） | ターゲット |
-|--------|---------------------|-----------|
-| 株価取得 | 平日 15:00 | Python株価取得Lambda |
-| 分析実行 | 平日 15:30 | Go Lambda（分析エンドポイント or 専用ハンドラ） |
-| 週次レポート | 日曜 18:00 | Go Lambda（週次レポート生成） |
+| ルール | スケジュール（JST） | ターゲット | 呼び出し方式 |
+|--------|---------------------|-----------|-------------|
+| 株価取得 | 平日 15:00 | Python株価取得Lambda | 直接invoke（別フェーズ） |
+| 分析実行 | 平日 15:30 | Worker Lambda（`{"job":"analyze"}`） | **直接invoke（採用）** |
+| 週次レポート | 日曜 18:00 | Worker Lambda（`{"job":"weekly_report"}`） | **直接invoke（採用）** |
 
-> 分析実行・週次レポートは現状 **HTTPエンドポイント未定義**。`/internal/analyze`・`/internal/weekly-report`
-> 等を `InternalAuth` 付きで追加し、EventBridge→Lambda（または Go内のスケジュール起動）から呼ぶ構成を推奨。
+> **採用方式（案B）**: 分析実行・週次レポートは **EventBridge → Worker Lambda の直接呼び出し** とする。
+> API Gateway / API Destination を介さないため、①EventBridge Connection 由来の Secrets Manager
+> シークレット（$0.40/月）が不要、②API Gatewayの30秒制限を受けず最大15分まで実行可能、という利点がある。
+> 認証は IAM で担保され `X-Internal-Secret` は不要。`main.go` の `dispatch` が定数input `{"job": "..."}` を
+> 判定し、`AnalysisUsecase.RunScheduled` / `ReportUsecase.RunWeekly` を実行する（パイプライン本体は別フェーズ）。
+> 詳細は `infra_architecture.md` を参照。
+>
+> なお HTTP の `/internal/analyze`・`/internal/weekly-report` は**定期実行には不要**だが、手動トリガー用に
+> `InternalAuth` 付きで追加することは任意で可能。
 
 ---
 
@@ -177,12 +189,12 @@ make build-lambda     # bootstrap を生成し lambda-handler.zip を作成
 - [ ] Neon プロジェクト作成・`NEON_DATABASE_URL` 設定・`migrate` 実行
 - [ ] 本番用 seed（管理者 + 招待コードのみ）スクリプト作成
 - [ ] `JWT_SECRET` / `INTERNAL_API_SECRET` を本番用ランダム値に差し替え
-- [ ] Go Lambda デプロイ（API Gateway HTTP API）
-- [ ] Python 株価取得Lambda 実装・デプロイ（`lambda/`）
-- [ ] `external.ClaudeClient` 本実装（Anthropic Messages API）
-- [ ] `external.LineClient` 本実装（LINE Messaging API）
-- [ ] `external.S3Client` 本実装（S3 PUT）
-- [ ] 分析実行 / 週次レポート生成の usecase・内部エンドポイント追加
-- [ ] EventBridge スケジュール3本設定
+- [~] Go Lambda デプロイ（API Gateway HTTP API）※CDK化済（`infra/`）。`make build-lambda`＋`cdk deploy`。実デプロイは要AWS認証
+- [ ] Python 株価取得Lambda 実装・デプロイ（`lambda/`）※CDK側は配線済（`-c stockFetchLambdaArn=...`で有効化）
+- [x] `external.ClaudeClient` 本実装（Anthropic Messages API）※env未設定時はスタブにフォールバック
+- [x] `external.LineClient` 本実装（LINE Messaging API push）※env未設定時はスタブにフォールバック
+- [x] `external.S3Client` 本実装（S3 PUT・aws-sdk-go-v2）※`NewS3Client`実装済。分析/週次usecase配線は次フェーズ
+- [~] 分析実行 / 週次レポート生成 ※エントリポイント（`RunScheduled`/`RunWeekly`）とEventBridge直接invoke・dispatch配線は実装済。パイプライン本体（Claude/集計/S3）は次フェーズ
+- [~] EventBridge スケジュール3本設定 ※CDK化済（`infra/`）。分析/週次は**Worker Lambda直接invoke（案B）**、株価取得はLambda ARN指定で有効化
 - [ ] フロント本番デプロイ・Cookie/CORS の本番疎通確認
 - [ ] 本番 Cookie 設定（`APP_ENV=production`・別ドメイン時の SameSite 方針確定）

@@ -1,0 +1,15 @@
+# CDK
+cdk.out/
+cdk.context.json
+
+# Node
+node_modules/
+
+# TypeScript build artifacts
+*.js
+*.d.ts
+!jest.config.js
+
+# misc
+.DS_Store
+*.log

@@ -853,7 +853,31 @@ func setupRouter() *gin.Engine {
   )
 }
 
-func Handler(ctx context.Context, req events.APIGatewayV2HTTPRequest) (events.APIGatewayV2HTTPResponse, error) {
+// scheduledEvent はEventBridgeルールが渡す定数input（{"job": "..."}）。
+type scheduledEvent struct {
+  Job string `json:"job"`
+}
+
+// dispatch はイベント種別で処理を振り分ける。
+//   - EventBridge定期実行（{"job":"analyze"|"weekly_report"}）→ 対応usecaseを直接実行
+//   - それ以外（API Gateway HTTP API イベント）→ ginにプロキシ
+// 同一バイナリを ApiFunction / WorkerFunction の2つのLambdaにデプロイし、本関数が振り分ける（案B）。
+func dispatch(ctx context.Context, raw json.RawMessage) (interface{}, error) {
+  var ev scheduledEvent
+  if err := json.Unmarshal(raw, &ev); err == nil && ev.Job != "" {
+    switch ev.Job {
+    case "analyze":
+      return nil, analysisUsecaseRef.RunScheduled(ctx)       // 平日15:30
+    case "weekly_report":
+      return nil, reportUsecaseRef.RunWeekly(ctx)            // 日曜18:00
+    default:
+      return nil, fmt.Errorf("dispatch: 未知のjob %q", ev.Job)
+    }
+  }
+  var req events.APIGatewayV2HTTPRequest
+  if err := json.Unmarshal(raw, &req); err != nil {
+    return nil, err
+  }
   return ginLambda.ProxyWithContext(ctx, req)
 }
 
@@ -861,12 +885,17 @@ func main() {
   r := setupRouter()
   if _, ok := os.LookupEnv("LAMBDA_TASK_ROOT"); ok {
     ginLambda = ginadapter.NewV2(r)
-    lambda.Start(Handler)
+    lambda.Start(dispatch) // API Gateway と EventBridge定期実行の両方を1つのdispatchで処理
   } else {
     log.Fatal(r.Run(":8080"))
   }
 }
 ```
+
+> **定期実行（案B）**: 分析（平日15:30）・週次レポート（日曜18:00）は EventBridge が **Worker Lambda を
+> 直接invoke** する（API Gateway/HTTPを介さない）。`{"job":"..."}` を `dispatch` が判定して
+> `RunScheduled`/`RunWeekly` を呼ぶ。利点は Secrets Manager コスト削減（Connection不要）と
+> API Gatewayの30秒制限回避（最大15分）。詳細は `doc/dev-spec/infra_architecture.md`。
 
 ### 4.6 OpenAPI仕様とコード生成
 
