@@ -223,10 +223,20 @@ paths:
     get:
       tags: [portfolio]
       operationId: getPositions
-      summary: 実運用保有株一覧
+      summary: 保有ポジション一覧
       description: |
-        実運用の保有株（real_positions・admin登録分）に stock_prices を結合し、
-        現在値・含み益・損益率を付与して返す。stock_prices が無い銘柄は close/含み益がnull。
+        `mode` 未指定または `real` のとき実運用の保有株（real_positions・admin登録分）を返す。
+        `mode=virtual` のとき未決済バーチャル（adminのtrades・銘柄ごとに数量合計/加重平均取得単価で集計）を返す。
+        いずれも stock_prices を結合し現在値・含み益・損益率を付与する（stock_prices が無い銘柄は null）。
+      parameters:
+        - name: mode
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [virtual, real]
+            default: real
+          description: 保有区分（virtual=バーチャル未決済 / real=実運用・既定）
       responses:
         '200':
           description: 取得成功
