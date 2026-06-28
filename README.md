@@ -52,6 +52,29 @@ cd back
 docker compose -f docker-compose.dev.yml exec app go run migrate/migrate.go
 ```
 
+### 2-1. サンプルデータ投入（ローカル動作確認用・任意）
+
+ローカルで画面を確認するためのサンプルデータ（管理者/一般ユーザー・招待コード・
+ウォッチリスト・株価・トレード・分析シグナル・週次レポート・候補など）を投入する。
+
+```bash
+cd back
+docker compose -f docker-compose.dev.yml exec app go run seed/seed.go
+```
+
+投入されるデモアカウント:
+
+| 区分 | メール | パスワード |
+|------|--------|-----------|
+| 管理者 | `admin@example.com` | `password123` |
+| 一般ユーザー | `user@example.com` | `password123` |
+
+新規登録の動作確認には招待コード `TRADE-DEMO-0001` / `TRADE-DEMO-0002` を使用する。
+
+> サンプルデータ（trades・analysis 等）は **管理者の共通ポートフォリオ** として投入される。
+> 外部連携（Claude API・LINE・S3・株価取得Lambda）はローカルではスタブ。実装方針は
+> [`doc/dev-spec/infra_requirements.md`](doc/dev-spec/infra_requirements.md) を参照。
+
 ### 3. フロントエンドの起動
 
 ```bash
